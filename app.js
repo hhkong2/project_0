@@ -9,6 +9,8 @@ const modeToggle = document.getElementById("mode-toggle");
 const soundToggle = document.getElementById("sound-toggle");
 const hapticToggle = document.getElementById("haptic-toggle");
 const intensitySlider = document.getElementById("intensity");
+const captureButton = document.getElementById("capture");
+const resetButton = document.getElementById("reset");
 
 const STORAGE_KEY = "joy_playground_settings_v1";
 
@@ -1190,6 +1192,66 @@ function seedAmbient() {
   }
 }
 
+function resetWorld() {
+  particles.length = 0;
+  rings.length = 0;
+  ribbons.length = 0;
+  bubbles.length = 0;
+  ui.joy = 0;
+  ui.combo = 0;
+  ui.lastActionAt = 0;
+  ui.lastStatusAt = 0;
+  ui.lastPartyAt = 0;
+  ui.nextPartyJoy = 160;
+  seedAmbient();
+}
+
+async function captureCanvas() {
+  setStatus("Capturing...");
+
+  const blob = await new Promise((resolve) => {
+    canvas.toBlob(resolve, "image/png");
+  });
+
+  if (!blob) {
+    setStatus("Capture failed.");
+    return;
+  }
+
+  // Prefer clipboard copy when supported (HTTPS + user gesture).
+  const canClipboard =
+    typeof ClipboardItem !== "undefined" &&
+    navigator.clipboard &&
+    typeof navigator.clipboard.write === "function";
+
+  if (canClipboard) {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      playTone({ freq: 620, duration: 0.08, type: "triangle", volume: 0.05, glide: 18, cutoff: 3200 });
+      vibrate([10, 8, 12]);
+      setStatus("Copied image to clipboard.");
+      bumpJoy(8);
+      return;
+    } catch {
+      // Fall back to download.
+    }
+  }
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `joy-playground-${Date.now()}.png`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 12_000);
+
+  playTone({ freq: 520, duration: 0.08, type: "triangle", volume: 0.05, glide: 14, cutoff: 3200 });
+  vibrate(10);
+  setStatus("Downloaded image.");
+  bumpJoy(6);
+}
+
 function bindUI() {
   modeToggle.addEventListener("click", cycleMode);
 
@@ -1222,6 +1284,17 @@ function bindUI() {
     ui.settings.intensity = clamp(Number(intensitySlider.value), 0.3, 1.6);
     saveSettings();
     setStatus(`Intensity ${ui.settings.intensity.toFixed(1)}x`);
+  });
+
+  captureButton.addEventListener("click", () => {
+    captureCanvas();
+  });
+
+  resetButton.addEventListener("click", () => {
+    resetWorld();
+    playTone({ freq: 320, duration: 0.09, type: "sine", volume: 0.04, glide: 26, cutoff: 2400 });
+    vibrate([12, 12]);
+    setStatus("Reset.");
   });
 
   window.addEventListener("keydown", (ev) => {
