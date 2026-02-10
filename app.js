@@ -65,6 +65,7 @@ const audio = {
   delayGain: null,
   delayFeedback: null,
   delayFilter: null,
+  noiseBuffer: null,
 };
 
 function clamp(value, min, max) {
@@ -177,6 +178,13 @@ function ensureAudio() {
     audio.delayFilter.connect(audio.delayFeedback);
     audio.delayFeedback.connect(audio.delay);
     audio.delayFilter.connect(audio.compressor);
+
+    // Cached noise for pops/sizzles.
+    audio.noiseBuffer = audio.ctx.createBuffer(1, audio.ctx.sampleRate, audio.ctx.sampleRate);
+    const noise = audio.noiseBuffer.getChannelData(0);
+    for (let i = 0; i < noise.length; i += 1) {
+      noise[i] = Math.random() * 2 - 1;
+    }
   }
   if (audio.ctx.state === "suspended") {
     audio.ctx.resume();
@@ -226,6 +234,40 @@ function playChord(rootHz) {
   playTone({ freq: rootHz, duration: 0.14, type: "triangle", volume: 0.055, glide: 16, cutoff: 2800 });
   playTone({ freq: rootHz * 1.25, duration: 0.18, type: "sine", volume: 0.04, glide: -10, cutoff: 2400 });
   playTone({ freq: rootHz * 1.5, duration: 0.2, type: "square", volume: 0.028, glide: -18, cutoff: 1900 });
+}
+
+function playPopNoise({ duration = 0.055, volume = 0.045, highpass = 800, lowpass = 5200, rate = 1 } = {}) {
+  const context = ensureAudio();
+  if (!context || !audio.noiseBuffer) return;
+
+  const now = context.currentTime;
+  const src = context.createBufferSource();
+  src.buffer = audio.noiseBuffer;
+  src.playbackRate.setValueAtTime(rate, now);
+
+  const hp = context.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.setValueAtTime(highpass, now);
+
+  const lp = context.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.setValueAtTime(lowpass, now);
+
+  const gain = context.createGain();
+  const scaled = volume * clamp(ui.settings.intensity, 0.3, 1.6);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(scaled, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+  src.connect(hp);
+  hp.connect(lp);
+  lp.connect(gain);
+  gain.connect(audio.master);
+
+  const maxOffset = Math.max(0, audio.noiseBuffer.duration - duration * 1.5);
+  const offset = maxOffset > 0 ? Math.random() * maxOffset : 0;
+  src.start(now, offset);
+  src.stop(now + duration + 0.02);
 }
 
 function vibrate(pattern) {
@@ -333,6 +375,72 @@ function spawnConfettiBurst(x, y) {
     });
   }
   spawnRing(x, y, { radius: 10, width: 3.5, life: 36, maxLife: 36, color: "#ffffff" });
+}
+
+function spawnBubble(x, y, options = {}) {
+  const intensity = clamp(ui.settings.intensity, 0.3, 1.6);
+  bubbles.push({
+    x,
+    y,
+    vx: options.vx ?? rand(-0.55, 0.55),
+    vy: options.vy ?? rand(-0.55, 0.55),
+    r: options.r ?? rand(12, 30) * lerp(0.9, 1.25, intensity / 1.6),
+    color: options.color ?? `hsla(${rand(0, 360)}, 95%, 62%, 0.35)`,
+    life: options.life ?? Math.round(rand(40 * 60, 95 * 60)),
+    maxLife: options.maxLife ?? options.life ?? Math.round(rand(40 * 60, 95 * 60)),
+    seed: options.seed ?? rand(0, 1000),
+  });
+  enforceLimit(bubbles, limits.bubbles);
+}
+
+function spawnBubbleCluster(x, y) {
+  const intensity = clamp(ui.settings.intensity, 0.3, 1.6);
+  const count = Math.round(6 * intensity);
+  for (let i = 0; i < count; i += 1) {
+    const a = rand(0, Math.PI * 2);
+    const d = rand(0, 18) * intensity;
+    spawnBubble(x + Math.cos(a) * d, y + Math.sin(a) * d, {
+      vx: rand(-0.8, 0.8),
+      vy: rand(-0.8, 0.8),
+      r: rand(12, 28) * intensity,
+      color: `hsla(${(hueShift + rand(-50, 110) + i * 18) % 360}, 95%, 62%, 0.32)`,
+    });
+  }
+}
+
+function spawnPopSparkle(x, y, color) {
+  const intensity = clamp(ui.settings.intensity, 0.3, 1.6);
+  const count = Math.round(16 * intensity);
+  for (let i = 0; i < count; i += 1) {
+    spawnParticle(x, y, {
+      speed: rand(0.3, 2.8) * intensity,
+      angle: rand(0, Math.PI * 2),
+      radius: rand(0.8, 2.6),
+      life: rand(16, 46),
+      maxLife: 46,
+      color,
+      gravity: 0.01,
+      drag: 0.982,
+      shape: Math.random() < 0.25 ? "streak" : "dot",
+    });
+  }
+  spawnRing(x, y, { radius: rand(4, 10) * intensity, width: rand(2, 3), life: 26, maxLife: 26, color: "#ffffff" });
+}
+
+function popBubblesAt(x, y, radius, maxPops) {
+  let popped = 0;
+  for (let i = bubbles.length - 1; i >= 0; i -= 1) {
+    const b = bubbles[i];
+    const d = Math.hypot(b.x - x, b.y - y);
+    if (d > radius + b.r) continue;
+
+    bubbles.splice(i, 1);
+    popped += 1;
+    spawnPopSparkle(b.x, b.y, b.color);
+    playPopNoise({ volume: 0.04, highpass: 900, lowpass: 6200, rate: rand(0.9, 1.25) });
+    if (popped >= maxPops) break;
+  }
+  return popped;
 }
 
 function width() {
@@ -623,6 +731,99 @@ function fireworksUp(ptr) {
   }
 }
 
+function bubblesDown(ptr) {
+  spawnBubbleCluster(ptr.x, ptr.y);
+  spawnRing(ptr.x, ptr.y, { radius: 12, width: 3.2, life: 34, maxLife: 34, color: "#ffffff" });
+
+  playPopNoise({ volume: 0.04, highpass: 650, lowpass: 4800, rate: rand(0.85, 1.2) });
+  playTone({ freq: 260 + rand(-30, 90), duration: 0.09, type: "sine", volume: 0.04, glide: 22, cutoff: 2600 });
+  vibrate(10);
+
+  bumpJoy(2);
+  maybeStatus();
+}
+
+function bubblesMove(ptr, dx, dy, now) {
+  const intensity = clamp(ui.settings.intensity, 0.3, 1.6);
+  const wandRadius = 170 * intensity;
+  const movement = Math.hypot(dx, dy);
+  const m = clamp(movement / 18, 0, 1);
+  const inv = movement > 0.0001 ? 1 / movement : 0;
+  const swx = -dy * inv;
+  const swy = dx * inv;
+
+  for (let i = 0; i < bubbles.length; i += 1) {
+    const b = bubbles[i];
+    const rx = b.x - ptr.x;
+    const ry = b.y - ptr.y;
+    const dist = Math.hypot(rx, ry);
+    if (dist > wandRadius) continue;
+
+    const t = (1 - dist / wandRadius) * (0.45 + 0.55 * m);
+    const invD = dist > 0.0001 ? 1 / dist : 0;
+
+    // Pull slightly toward pointer + swirl from movement.
+    b.vx += (-rx * invD) * t * 0.42 * intensity;
+    b.vy += (-ry * invD) * t * 0.42 * intensity;
+    b.vx += swx * t * 1.1 * intensity;
+    b.vy += swy * t * 1.1 * intensity;
+
+    // Fast swipe can "slice-pop" small bubbles.
+    if (ptr.speed > 0.75 && dist < b.r * 0.95 && b.r < 30 * intensity) {
+      b.r *= 0.6;
+      if (b.r < 9) {
+        bubbles.splice(i, 1);
+        spawnPopSparkle(ptr.x, ptr.y, b.color);
+        playPopNoise({ volume: 0.04, highpass: 900, lowpass: 6800, rate: rand(1.0, 1.35) });
+        vibrate(6);
+        bumpJoy(4);
+      }
+    }
+  }
+
+  if (now - ptr.lastTrailAt > 22) {
+    ptr.lastTrailAt = now;
+    spawnParticle(ptr.x, ptr.y, {
+      speed: rand(0.2, 1.3) * intensity,
+      angle: rand(0, Math.PI * 2),
+      radius: rand(0.8, 2.0),
+      life: rand(10, 28),
+      maxLife: 30,
+      color: `hsla(${(ptr.hue + 30) % 360}, 95%, 70%, 0.85)`,
+      gravity: 0.002,
+      drag: 0.975,
+    });
+  }
+
+  if (now - ptr.lastSoundAt > 120) {
+    ptr.lastSoundAt = now;
+    const f = 300 + clamp(ptr.speed * 900, 0, 380) + rand(-15, 15);
+    playTone({ freq: f, duration: 0.06, type: "triangle", volume: 0.02, glide: 40, cutoff: 3000 });
+  }
+
+  bumpJoy(1);
+}
+
+function bubblesUp(ptr) {
+  const intensity = clamp(ui.settings.intensity, 0.3, 1.6);
+  const radius = clamp(120 + ptr.dragDistance * 0.12, 120, 240) * intensity;
+  const popped = popBubblesAt(ptr.x, ptr.y, radius, Math.round(10 * intensity));
+
+  if (popped > 0) {
+    spawnRing(ptr.x, ptr.y, { radius: 10, width: 3.2, life: 36, maxLife: 36, color: "#ffffff" });
+    vibrate([10, 12, 14]);
+    bumpJoy(5 + popped);
+    setStatus(`Bubble pop x${popped}.  JOY ${ui.joy}`);
+  } else {
+    // Gentle "thump" even if you miss.
+    spawnRing(ptr.x, ptr.y, { radius: 8, width: 2.6, life: 26, maxLife: 26, color: "#ffffff" });
+    playPopNoise({ volume: 0.028, highpass: 600, lowpass: 4200, rate: rand(0.8, 1.05) });
+    vibrate(8);
+    bumpJoy(2);
+    setStatus(`No pop. Try a bigger swipe.  JOY ${ui.joy}`);
+  }
+}
+
 function onPointerDown(ev) {
   const now = performance.now();
   const { x, y } = posFromEvent(ev);
@@ -643,15 +844,18 @@ function onPointerDown(ev) {
     lastSoundAt: 0,
     lastHapticAt: 0,
     path: [],
+    modeId: ui.settings.modeId,
   };
   pointers.set(ev.pointerId, ptr);
 
   ensureAudio(); // resume on first gesture if enabled
 
-  if (ui.settings.modeId === "ribbons") addRibbonPoint(ptr, x, y, now);
+  if (ptr.modeId === "ribbons") addRibbonPoint(ptr, x, y, now);
 
-  // For now, fireworks behavior is the baseline for all modes until mode-specific logic is added.
-  fireworksDown(ptr);
+  if (ptr.modeId === "fireworks") fireworksDown(ptr);
+  else if (ptr.modeId === "bubbles") bubblesDown(ptr);
+  else if (ptr.modeId === "ribbons") fireworksDown(ptr);
+  else fireworksDown(ptr);
 }
 
 function onPointerMove(ev) {
@@ -673,9 +877,12 @@ function onPointerMove(ev) {
   ptr.speed = lerp(ptr.speed, dist / dt, 0.35);
   ptr.lastT = now;
 
-  if (ui.settings.modeId === "ribbons") addRibbonPoint(ptr, x, y, now);
+  if (ptr.modeId === "ribbons") addRibbonPoint(ptr, x, y, now);
 
-  fireworksMove(ptr, now);
+  if (ptr.modeId === "fireworks") fireworksMove(ptr, now);
+  else if (ptr.modeId === "bubbles") bubblesMove(ptr, dx, dy, now);
+  else if (ptr.modeId === "ribbons") fireworksMove(ptr, now);
+  else fireworksMove(ptr, now);
 }
 
 function onPointerUp(ev) {
@@ -688,7 +895,7 @@ function onPointerUp(ev) {
     // ignore
   }
 
-  if (ui.settings.modeId === "ribbons" && ptr.path.length > 6) {
+  if (ptr.modeId === "ribbons" && ptr.path.length > 6) {
     ribbons.push({
       points: ptr.path.slice(),
       life: 80,
@@ -699,7 +906,10 @@ function onPointerUp(ev) {
     enforceLimit(ribbons, limits.ribbons);
   }
 
-  fireworksUp(ptr);
+  if (ptr.modeId === "fireworks") fireworksUp(ptr);
+  else if (ptr.modeId === "bubbles") bubblesUp(ptr);
+  else if (ptr.modeId === "ribbons") fireworksUp(ptr);
+  else fireworksUp(ptr);
   maybeStatus();
 }
 
@@ -715,7 +925,7 @@ function cycleMode() {
   saveSettings();
 
   if (ui.settings.modeId === "fireworks") setStatus("Mode: Fireworks");
-  if (ui.settings.modeId === "bubbles") setStatus("Mode: Bubbles (coming alive next)");
+  if (ui.settings.modeId === "bubbles") setStatus("Mode: Bubbles");
   if (ui.settings.modeId === "ribbons") setStatus("Mode: Ribbons");
 
   vibrate(8);
@@ -819,4 +1029,3 @@ function boot() {
 }
 
 boot();
-
