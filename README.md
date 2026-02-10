@@ -13,20 +13,33 @@ Directly opening `index.html` also works, but a local server is more stable for 
 
 ## Interaction
 
-- Click: mini burst + sound + short vibration
-- Drag: sparkling trail + rhythm tone + repeated vibration
+- Multi-touch: use 2+ fingers for extra chaos.
+- `MODE`:
+  - `FIREWORKS`: click/drag for bursts and trails
+  - `BUBBLES`: drag to swirl, release to pop nearby bubbles
+  - `RIBBONS`: draw ribbons; loops and zigzags trigger bonus effects
+- `INTENSITY`: scales visuals/sound response
 - Toggles:
   - `SOUND ON/OFF`
   - `VIBE ON/OFF`
 
+Keyboard:
+
+- `M`: cycle mode
+- `S`: toggle sound
+- `V`: toggle vibration
+- `Space`: random party burst
+- `Up/Down`: intensity +/- 0.1
+
 ## Vercel Deploy
 
-1. Install CLI:
-   - `npm.cmd install -g vercel`
-2. Deploy (first time):
-   - `vercel.cmd`
-3. Production deploy:
-   - `vercel.cmd --prod`
+This repo is connected to Vercel via GitHub integration, so pushing to `main` will deploy automatically.
+
+Optional (manual CLI deploy):
+
+1. Install CLI: `npm.cmd install -g vercel`
+2. Deploy preview: `vercel.cmd`
+3. Deploy production: `vercel.cmd --prod`
 
 ## Git Workflow
 

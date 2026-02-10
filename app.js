@@ -29,6 +29,9 @@ const STATUS_LINES = [
   "Two fingers feels great.",
 ];
 
+// Keeps tones pleasant without losing playfulness.
+const PENTATONIC = [0, 3, 5, 7, 10];
+
 const pointers = new Map(); // pointerId -> state
 const particles = [];
 const rings = [];
@@ -48,6 +51,8 @@ const ui = {
   combo: 0,
   lastActionAt: 0,
   lastStatusAt: 0,
+  lastPartyAt: 0,
+  nextPartyJoy: 160,
   modeIndex: 0,
   settings: {
     modeId: "fireworks",
@@ -82,6 +87,21 @@ function rand(min, max) {
 
 function randomFrom(items) {
   return items[Math.floor(Math.random() * items.length)];
+}
+
+function midiToHz(midi) {
+  return 440 * 2 ** ((midi - 69) / 12);
+}
+
+function quantizeYToHz(y) {
+  const h = height();
+  const t = clamp(1 - y / Math.max(1, h), 0, 0.999);
+  const steps = PENTATONIC.length * 3;
+  const idx = Math.floor(t * steps);
+  const octave = Math.floor(idx / PENTATONIC.length);
+  const step = PENTATONIC[idx % PENTATONIC.length];
+  const rootMidi = 57; // A3
+  return midiToHz(rootMidi + octave * 12 + step);
 }
 
 function setStatus(text) {
@@ -287,8 +307,9 @@ function bumpJoy(points) {
   const scored = points * ui.combo;
   ui.joy += scored;
 
-  if (ui.joy > 0 && ui.joy % 100 < scored) {
-    // Small celebration every 100 joy.
+  if (ui.joy >= ui.nextPartyJoy && now - ui.lastPartyAt > 2200) {
+    ui.lastPartyAt = now;
+    ui.nextPartyJoy += 160;
     spawnConfettiBurst(rand(0.25, 0.75) * width(), rand(0.25, 0.75) * height());
     playChord(260 + rand(-30, 60));
     vibrate([18, 18, 24]);
@@ -638,6 +659,33 @@ function renderRibbons(w, h) {
   ctx.globalAlpha = 1;
 }
 
+function renderLiveRibbons() {
+  const intensity = clamp(ui.settings.intensity, 0.3, 1.6);
+  for (const ptr of pointers.values()) {
+    if (ptr.modeId !== "ribbons") continue;
+    const pts = ptr.path;
+    if (!pts || pts.length < 3) continue;
+
+    ctx.globalAlpha = 0.95;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 8.4 * intensity;
+    ctx.strokeStyle = `hsla(${ptr.hue}, 98%, 70%, 0.85)`;
+
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let p = 1; p < pts.length - 2; p += 1) {
+      const cx = pts[p].x;
+      const cy = pts[p].y;
+      const nx = (pts[p].x + pts[p + 1].x) * 0.5;
+      const ny = (pts[p].y + pts[p + 1].y) * 0.5;
+      ctx.quadraticCurveTo(cx, cy, nx, ny);
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
 function animate(time) {
   const w = width();
   const h = height();
@@ -649,6 +697,7 @@ function animate(time) {
   ctx.globalCompositeOperation = "source-over";
   renderBubbles(w, h);
   renderRibbons(w, h);
+  renderLiveRibbons();
 
   ctx.globalCompositeOperation = "lighter";
   renderPointerGlows(time);
@@ -670,6 +719,70 @@ function addRibbonPoint(ptr, x, y, now) {
   if (last && Math.hypot(x - last.x, y - last.y) < 3) return;
   ptr.path.push({ x, y, t: now });
   if (ptr.path.length > 220) ptr.path.shift();
+}
+
+function analyzeGesture(points) {
+  if (!points || points.length < 12) return { kind: "none" };
+
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of points) {
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  }
+  const w = maxX - minX;
+  const h = maxY - minY;
+  const size = Math.max(w, h);
+  const aspect = w > 0.0001 ? h / w : 999;
+
+  let length = 0;
+  let sharpTurns = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const dx = points[i].x - points[i - 1].x;
+    const dy = points[i].y - points[i - 1].y;
+    length += Math.hypot(dx, dy);
+  }
+
+  for (let i = 2; i < points.length; i += 1) {
+    const ax = points[i - 1].x - points[i - 2].x;
+    const ay = points[i - 1].y - points[i - 2].y;
+    const bx = points[i].x - points[i - 1].x;
+    const by = points[i].y - points[i - 1].y;
+    const al = Math.hypot(ax, ay);
+    const bl = Math.hypot(bx, by);
+    if (al < 2 || bl < 2) continue;
+    const dot = ax * bx + ay * by;
+    const cos = clamp(dot / (al * bl), -1, 1);
+    const ang = Math.acos(cos);
+    if (ang > 1.05) sharpTurns += 1;
+  }
+
+  const start = points[0];
+  const end = points[points.length - 1];
+  const endDist = Math.hypot(end.x - start.x, end.y - start.y);
+
+  const looksLikeLoop =
+    points.length > 22 &&
+    size > 70 &&
+    endDist < size * 0.35 &&
+    aspect > 0.55 &&
+    aspect < 1.8 &&
+    length > size * 2.6;
+
+  if (looksLikeLoop) {
+    return { kind: "loop", box: { minX, maxX, minY, maxY }, size, length, sharpTurns };
+  }
+
+  const looksLikeZigzag = size > 120 && sharpTurns > 14 && length > size * 1.8;
+  if (looksLikeZigzag) {
+    return { kind: "zigzag", box: { minX, maxX, minY, maxY }, size, length, sharpTurns };
+  }
+
+  return { kind: "none", box: { minX, maxX, minY, maxY }, size, length, sharpTurns };
 }
 
 function fireworksDown(ptr) {
@@ -728,6 +841,145 @@ function fireworksUp(ptr) {
     vibrate([24, 12, 30]);
     setStatus(`Drag wave ${Math.round(ptr.dragDistance)}px.  JOY ${ui.joy}`);
     bumpJoy(Math.round(clamp(ptr.dragDistance / 14, 5, 26)));
+  }
+}
+
+function ribbonsDown(ptr) {
+  spawnRing(ptr.x, ptr.y, { radius: 10, width: 3.1, life: 30, maxLife: 30, color: "#ffffff" });
+  playTone({ freq: quantizeYToHz(ptr.y), duration: 0.08, type: "triangle", volume: 0.05, glide: 10, cutoff: 2600 });
+  vibrate(8);
+  bumpJoy(2);
+  maybeStatus();
+}
+
+function ribbonsMove(ptr, dx, dy, now) {
+  const intensity = clamp(ui.settings.intensity, 0.3, 1.6);
+  if (now - ptr.lastTrailAt > 16) {
+    ptr.lastTrailAt = now;
+    const c = `hsla(${ptr.hue}, 98%, 72%, 0.85)`;
+    spawnParticle(ptr.x, ptr.y, {
+      speed: rand(0.1, 1.2) * intensity,
+      angle: rand(0, Math.PI * 2),
+      radius: rand(0.8, 2.2),
+      life: rand(12, 36),
+      maxLife: 36,
+      color: c,
+      gravity: 0.002,
+      drag: 0.975,
+    });
+    if (Math.random() < 0.2) spawnParticle(ptr.x, ptr.y, { speed: rand(0.5, 2.2), angle: Math.atan2(dy, dx), radius: 1.4, life: 18, maxLife: 26, color: "#ffffff", gravity: 0.001, drag: 0.972, shape: "streak" });
+  }
+
+  if (now - ptr.lastSoundAt > 80) {
+    ptr.lastSoundAt = now;
+    const f = quantizeYToHz(ptr.y);
+    playTone({ freq: f, duration: 0.07, type: "sine", volume: 0.028, glide: 18, cutoff: 3200 });
+  }
+
+  if (now - ptr.lastHapticAt > 140) {
+    ptr.lastHapticAt = now;
+    vibrate(4);
+  }
+
+  bumpJoy(1);
+}
+
+function ribbonsUp(ptr) {
+  const intensity = clamp(ui.settings.intensity, 0.3, 1.6);
+  if (ptr.path.length > 6) {
+    const gesture = analyzeGesture(ptr.path);
+    const color = `hsla(${ptr.hue}, 98%, 70%, 0.9)`;
+
+    ribbons.push({
+      points: ptr.path.slice(),
+      life: 88,
+      maxLife: 88,
+      width: 7.8 * intensity,
+      color,
+    });
+    enforceLimit(ribbons, limits.ribbons);
+
+    // Sparkle along the ribbon.
+    for (let i = 0; i < ptr.path.length; i += Math.round(10 / intensity)) {
+      const p = ptr.path[i];
+      spawnParticle(p.x, p.y, {
+        speed: rand(0.3, 2.2) * intensity,
+        angle: rand(0, Math.PI * 2),
+        radius: rand(0.8, 2.4),
+        life: rand(18, 52),
+        maxLife: 52,
+        color,
+        gravity: 0.008,
+        drag: 0.983,
+        shape: Math.random() < 0.2 ? "streak" : "dot",
+      });
+    }
+
+    if (gesture.kind === "loop") {
+      const cx = (gesture.box.minX + gesture.box.maxX) * 0.5;
+      const cy = (gesture.box.minY + gesture.box.maxY) * 0.5;
+      const r = gesture.size * 0.32;
+      // Spiral burst (manual, without relying on vx/vy overrides).
+      const steps = Math.round(140 * intensity);
+      const turns = 5 + Math.round(intensity * 3);
+      for (let i = 0; i < steps; i += 1) {
+        const t = i / Math.max(1, steps - 1);
+        const a = t * Math.PI * 2 * turns;
+        const rr = r * (0.18 + t * 0.82);
+        spawnParticle(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr, {
+          speed: rand(0.9, 3.6) * intensity,
+          angle: a + Math.PI * 0.5,
+          radius: rand(0.8, 2.8),
+          life: rand(24, 78),
+          maxLife: 78,
+          color: `hsla(${(ptr.hue + t * 90) % 360}, 98%, 70%, 0.9)`,
+          gravity: 0.006,
+          drag: 0.986,
+          shape: Math.random() < 0.3 ? "streak" : "dot",
+        });
+      }
+      spawnRing(cx, cy, { radius: 10, width: 3.4, life: 42, maxLife: 42, color: "#ffffff" });
+      playChord(quantizeYToHz(cy));
+      vibrate([18, 18, 24]);
+      bumpJoy(18);
+      setStatus(`Loop bonus!  JOY ${ui.joy}`);
+      return;
+    }
+
+    if (gesture.kind === "zigzag") {
+      for (let i = 2; i < ptr.path.length; i += Math.round(6 / intensity)) {
+        const a = ptr.path[i - 2];
+        const b = ptr.path[i];
+        const ang = Math.atan2(b.y - a.y, b.x - a.x);
+        spawnParticle(b.x, b.y, {
+          speed: rand(2.2, 5.2) * intensity,
+          angle: ang,
+          radius: rand(1.2, 2.8),
+          life: rand(18, 58),
+          maxLife: 58,
+          color: "#ffffff",
+          gravity: 0.01,
+          drag: 0.984,
+          shape: "streak",
+        });
+      }
+      playTone({ freq: 520 + rand(-40, 60), duration: 0.06, type: "square", volume: 0.04, glide: -40, cutoff: 2400 });
+      playPopNoise({ volume: 0.035, highpass: 1200, lowpass: 7500, rate: rand(0.95, 1.2) });
+      vibrate([12, 12, 12, 12]);
+      bumpJoy(14);
+      setStatus(`Zigzag bonus!  JOY ${ui.joy}`);
+      return;
+    }
+
+    playChord(quantizeYToHz(ptr.y));
+    vibrate([10, 12, 10]);
+    bumpJoy(6);
+    setStatus(`Ribbon released.  JOY ${ui.joy}`);
+  } else {
+    playTone({ freq: quantizeYToHz(ptr.y), duration: 0.08, type: "triangle", volume: 0.04, glide: 12, cutoff: 2800 });
+    vibrate(10);
+    bumpJoy(3);
+    setStatus(`Tiny ribbon tap.  JOY ${ui.joy}`);
   }
 }
 
@@ -854,7 +1106,7 @@ function onPointerDown(ev) {
 
   if (ptr.modeId === "fireworks") fireworksDown(ptr);
   else if (ptr.modeId === "bubbles") bubblesDown(ptr);
-  else if (ptr.modeId === "ribbons") fireworksDown(ptr);
+  else if (ptr.modeId === "ribbons") ribbonsDown(ptr);
   else fireworksDown(ptr);
 }
 
@@ -881,7 +1133,7 @@ function onPointerMove(ev) {
 
   if (ptr.modeId === "fireworks") fireworksMove(ptr, now);
   else if (ptr.modeId === "bubbles") bubblesMove(ptr, dx, dy, now);
-  else if (ptr.modeId === "ribbons") fireworksMove(ptr, now);
+  else if (ptr.modeId === "ribbons") ribbonsMove(ptr, dx, dy, now);
   else fireworksMove(ptr, now);
 }
 
@@ -895,20 +1147,9 @@ function onPointerUp(ev) {
     // ignore
   }
 
-  if (ptr.modeId === "ribbons" && ptr.path.length > 6) {
-    ribbons.push({
-      points: ptr.path.slice(),
-      life: 80,
-      maxLife: 80,
-      width: 7.5 * clamp(ui.settings.intensity, 0.3, 1.6),
-      color: `hsla(${ptr.hue}, 98%, 70%, 0.9)`,
-    });
-    enforceLimit(ribbons, limits.ribbons);
-  }
-
   if (ptr.modeId === "fireworks") fireworksUp(ptr);
   else if (ptr.modeId === "bubbles") bubblesUp(ptr);
-  else if (ptr.modeId === "ribbons") fireworksUp(ptr);
+  else if (ptr.modeId === "ribbons") ribbonsUp(ptr);
   else fireworksUp(ptr);
   maybeStatus();
 }
@@ -925,8 +1166,8 @@ function cycleMode() {
   saveSettings();
 
   if (ui.settings.modeId === "fireworks") setStatus("Mode: Fireworks");
-  if (ui.settings.modeId === "bubbles") setStatus("Mode: Bubbles");
-  if (ui.settings.modeId === "ribbons") setStatus("Mode: Ribbons");
+  if (ui.settings.modeId === "bubbles") setStatus("Mode: Bubbles. Drag to swirl, release to pop.");
+  if (ui.settings.modeId === "ribbons") setStatus("Mode: Ribbons. Draw loops/zigzags for bonuses.");
 
   vibrate(8);
   playTone({ freq: 420 + ui.modeIndex * 90, duration: 0.08, type: "triangle", volume: 0.05, glide: 20 });

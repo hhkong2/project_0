@@ -1,35 +1,37 @@
 # Development Log
 
-프로젝트의 개발 과정을 Git 커밋과 함께 추적하기 위한 기록 파일입니다.
+This file records decisions and progress alongside Git commits.
 
-## Workflow
+## Design Q&A (Self-Directed)
 
-1. 작업 시작 전:
-   - `git checkout -b feat/<기능명>` 또는 `fix/<수정명>`
-2. 기능 단위 구현 후:
-   - `git add .`
-   - `git commit -m "feat: <변경 요약>"`
-3. 배포 전:
-   - 로컬 확인 후 `main`에 병합
-   - `vercel --prod`로 배포
+Q: What makes a "joy-only" app feel instantly fun without goals or rules?
+A: Fast feedback (light + sound + haptics), multi-touch play, and a few surprising bonuses (gesture rewards).
 
-## Commit Convention
+Q: How do we keep sound always pleasant while still feeling responsive?
+A: In `RIBBONS` mode, quantize notes to a pentatonic scale so almost any movement sounds musical.
 
-- `feat:` 사용자 기능 추가
-- `fix:` 버그 수정
-- `style:` UI/CSS 변경
-- `refactor:` 동작 변경 없는 구조 개선
-- `docs:` 문서 수정
-- `chore:` 설정/도구 변경
+Q: How do we keep it easy to deploy forever?
+A: Keep it a static, zero-build site (plain `index.html` + `styles.css` + `app.js`) so Vercel deploys on every push.
 
-## Log Entries
+## Timeline
 
 ### 2026-02-10
 
-- `chore: initialize project with joy playground web app`
-- 정적 웹앱 파일(`index.html`, `styles.css`, `app.js`) 구성
-- 인터랙션(클릭/드래그), 사운드(Web Audio), 진동(`navigator.vibrate`) 구현
+- `chore: initialize joy playground app`
+  - Static site scaffold + canvas particles
+  - Pointer interactions + WebAudio tones + vibration toggle
 - `chore: add vercel deployment config`
-- `chore: connect repository and deploy to vercel production`
-- 원격 저장소 `https://github.com/hhkong2/project_0.git` 연결 및 `main` 푸시
-- Vercel 프로젝트 `heekwangs-projects/minesweeper` 생성 및 프로덕션 배포 완료
+  - `vercel.json` added
+- `chore: record vercel deployment and repo connection`
+  - GitHub remote connected and Vercel production deploy completed
+
+### 2026-02-10 (Enhancements)
+
+- `refactor: rebuild core with mode + intensity controls`
+  - ASCII-safe UI text
+  - Mode toggle + intensity slider
+  - Multi-touch pointer tracking + settings persistence
+- `feat: add bubbles mode with pop synth`
+  - `BUBBLES` mode with swirl physics + pop noise
+- `feat: add ribbons mode with gesture bonuses`
+  - `RIBBONS` mode with live ribbon drawing + loop/zigzag bonuses
