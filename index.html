@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ko">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -14,16 +14,26 @@
   </head>
   <body>
     <main class="app">
-      <canvas id="joy-canvas" aria-label="joy interaction area"></canvas>
+      <canvas id="joy-canvas" aria-label="Joy interaction canvas"></canvas>
 
       <section class="hud">
         <h1>JOY PLAYGROUND</h1>
-        <p class="hint">클릭하거나 드래그해서 빛, 소리, 진동을 느껴보세요.</p>
+        <p class="hint">Click or drag. Make light, sound, and (on supported devices) vibration.</p>
+
         <div class="controls">
+          <button id="mode-toggle" class="toggle" type="button">MODE: FIREWORKS</button>
           <button id="sound-toggle" class="toggle" type="button" aria-pressed="true">SOUND ON</button>
           <button id="haptic-toggle" class="toggle" type="button" aria-pressed="true">VIBE ON</button>
         </div>
-        <p id="status" class="status">준비 완료</p>
+
+        <div class="sliders">
+          <label class="slider">
+            <span>INTENSITY</span>
+            <input id="intensity" type="range" min="0.3" max="1.6" step="0.1" value="1" />
+          </label>
+        </div>
+
+        <p id="status" class="status">Ready</p>
       </section>
     </main>
 

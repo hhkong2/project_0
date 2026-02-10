@@ -1,51 +1,82 @@
+// Joy Playground - single-file, zero-build, Vercel-friendly.
+// Focus: tactile delight via pointer play + (optional) sound + (optional) haptics.
+
 const canvas = document.getElementById("joy-canvas");
-const ctx = canvas.getContext("2d");
+const ctx = canvas.getContext("2d", { alpha: true });
+
 const statusLabel = document.getElementById("status");
+const modeToggle = document.getElementById("mode-toggle");
 const soundToggle = document.getElementById("sound-toggle");
 const hapticToggle = document.getElementById("haptic-toggle");
+const intensitySlider = document.getElementById("intensity");
 
-const palette = ["#57f6ff", "#ffe166", "#ff6ea3", "#7fffd4", "#ffd9f7", "#65ff88"];
+const STORAGE_KEY = "joy_playground_settings_v1";
 
-const messages = [
-  "작은 반짝임 생성!",
-  "좋아요, 계속 흔들어보세요!",
-  "완벽한 터치!",
-  "오늘의 기분 점수 상승!",
-  "반짝반짝 에너지가 퍼졌어요!",
-  "아주 좋은 리듬이에요!",
+const MODES = [
+  { id: "fireworks", label: "FIREWORKS" },
+  { id: "bubbles", label: "BUBBLES" },
+  { id: "ribbons", label: "RIBBONS" },
 ];
 
+const BASE_PALETTE = ["#57f6ff", "#ffe166", "#ff6ea3", "#7fffd4", "#ffd9f7", "#65ff88"];
+
+const STATUS_LINES = [
+  "Nice. Again.",
+  "That felt good.",
+  "More sparkles!",
+  "Tiny chaos, perfect.",
+  "Make a big loop.",
+  "Two fingers feels great.",
+];
+
+const pointers = new Map(); // pointerId -> state
 const particles = [];
 const rings = [];
-let dpr = Math.min(window.devicePixelRatio || 1, 2);
-let soundEnabled = true;
-let hapticEnabled = true;
-let audioCtx;
-let activePointerId = null;
-let pointerDown = false;
-let downX = 0;
-let downY = 0;
-let dragDistance = 0;
-let lastTrailStamp = 0;
-let lastSoundStamp = 0;
-let lastHapticStamp = 0;
-let lastMessageStamp = 0;
-let hueShift = 0;
+const ribbons = [];
+const bubbles = [];
 
-const uiState = {
-  joyScore: 0,
+const limits = {
+  particles: 1400,
+  rings: 120,
+  ribbons: 14,
+  bubbles: 90,
 };
 
-function resizeCanvas() {
-  dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const { width, height } = canvas.getBoundingClientRect();
-  canvas.width = Math.max(1, Math.round(width * dpr));
-  canvas.height = Math.max(1, Math.round(height * dpr));
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-}
+const ui = {
+  dpr: Math.min(window.devicePixelRatio || 1, 2),
+  joy: 0,
+  combo: 0,
+  lastActionAt: 0,
+  lastStatusAt: 0,
+  modeIndex: 0,
+  settings: {
+    modeId: "fireworks",
+    intensity: 1,
+    soundEnabled: true,
+    hapticEnabled: true,
+  },
+};
+
+const audio = {
+  ctx: null,
+  master: null,
+  compressor: null,
+  delay: null,
+  delayGain: null,
+  delayFeedback: null,
+  delayFilter: null,
+};
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function rand(min, max) {
+  return min + Math.random() * (max - min);
 }
 
 function randomFrom(items) {
@@ -56,186 +87,302 @@ function setStatus(text) {
   statusLabel.textContent = text;
 }
 
-function updateToggles() {
-  soundToggle.setAttribute("aria-pressed", String(soundEnabled));
-  soundToggle.textContent = soundEnabled ? "SOUND ON" : "SOUND OFF";
-  hapticToggle.setAttribute("aria-pressed", String(hapticEnabled));
-  hapticToggle.textContent = hapticEnabled ? "VIBE ON" : "VIBE OFF";
+function saveSettings() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(ui.settings));
+  } catch {
+    // ignore
+  }
+}
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return;
+    ui.settings.modeId = typeof parsed.modeId === "string" ? parsed.modeId : ui.settings.modeId;
+    ui.settings.intensity =
+      typeof parsed.intensity === "number" ? clamp(parsed.intensity, 0.3, 1.6) : ui.settings.intensity;
+    ui.settings.soundEnabled =
+      typeof parsed.soundEnabled === "boolean" ? parsed.soundEnabled : ui.settings.soundEnabled;
+    ui.settings.hapticEnabled =
+      typeof parsed.hapticEnabled === "boolean" ? parsed.hapticEnabled : ui.settings.hapticEnabled;
+  } catch {
+    // ignore
+  }
+}
+
+function updateControls() {
+  const modeIdx = MODES.findIndex((m) => m.id === ui.settings.modeId);
+  ui.modeIndex = modeIdx >= 0 ? modeIdx : 0;
+  modeToggle.textContent = `MODE: ${MODES[ui.modeIndex].label}`;
+
+  soundToggle.setAttribute("aria-pressed", String(ui.settings.soundEnabled));
+  soundToggle.textContent = ui.settings.soundEnabled ? "SOUND ON" : "SOUND OFF";
+
+  hapticToggle.setAttribute("aria-pressed", String(ui.settings.hapticEnabled));
+  hapticToggle.textContent = ui.settings.hapticEnabled ? "VIBE ON" : "VIBE OFF";
+
+  intensitySlider.value = String(ui.settings.intensity);
+}
+
+function resizeCanvas() {
+  ui.dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const { width, height } = canvas.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.round(width * ui.dpr));
+  canvas.height = Math.max(1, Math.round(height * ui.dpr));
+  ctx.setTransform(ui.dpr, 0, 0, ui.dpr, 0, 0);
 }
 
 function ensureAudio() {
-  if (!soundEnabled) {
-    return null;
-  }
-  if (!audioCtx) {
+  if (!ui.settings.soundEnabled) return null;
+  if (!audio.ctx) {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx) {
-      soundEnabled = false;
-      updateToggles();
-      setStatus("이 브라우저는 오디오 생성이 제한됩니다.");
+      ui.settings.soundEnabled = false;
+      updateControls();
+      saveSettings();
+      setStatus("Audio not supported in this browser.");
       return null;
     }
-    audioCtx = new AudioCtx();
+    audio.ctx = new AudioCtx();
+    audio.master = audio.ctx.createGain();
+    audio.master.gain.value = 0.85;
+
+    audio.compressor = audio.ctx.createDynamicsCompressor();
+    audio.compressor.threshold.value = -22;
+    audio.compressor.knee.value = 28;
+    audio.compressor.ratio.value = 10;
+    audio.compressor.attack.value = 0.003;
+    audio.compressor.release.value = 0.18;
+
+    // A tiny echo makes everything feel "alive".
+    audio.delay = audio.ctx.createDelay(0.5);
+    audio.delay.delayTime.value = 0.18;
+    audio.delayGain = audio.ctx.createGain();
+    audio.delayGain.gain.value = 0.18;
+    audio.delayFeedback = audio.ctx.createGain();
+    audio.delayFeedback.gain.value = 0.22;
+    audio.delayFilter = audio.ctx.createBiquadFilter();
+    audio.delayFilter.type = "lowpass";
+    audio.delayFilter.frequency.value = 2200;
+
+    audio.master.connect(audio.compressor);
+    audio.compressor.connect(audio.ctx.destination);
+
+    audio.master.connect(audio.delayGain);
+    audio.delayGain.connect(audio.delay);
+    audio.delay.connect(audio.delayFilter);
+    audio.delayFilter.connect(audio.delayFeedback);
+    audio.delayFeedback.connect(audio.delay);
+    audio.delayFilter.connect(audio.compressor);
   }
-  if (audioCtx.state === "suspended") {
-    audioCtx.resume();
+  if (audio.ctx.state === "suspended") {
+    audio.ctx.resume();
   }
-  return audioCtx;
+  return audio.ctx;
 }
 
-function playTone(freq, duration = 0.11, type = "triangle", volume = 0.055, glide = 0) {
+function playTone({
+  freq,
+  duration = 0.11,
+  type = "triangle",
+  volume = 0.05,
+  glide = 0,
+  cutoff = 3200,
+} = {}) {
   const context = ensureAudio();
-  if (!context) {
-    return;
-  }
+  if (!context) return;
 
   const now = context.currentTime;
-  const oscillator = context.createOscillator();
+  const osc = context.createOscillator();
   const gain = context.createGain();
   const filter = context.createBiquadFilter();
 
   filter.type = "lowpass";
-  filter.frequency.setValueAtTime(2600, now);
+  filter.frequency.setValueAtTime(cutoff, now);
 
-  oscillator.type = type;
-  oscillator.frequency.setValueAtTime(freq, now);
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, now);
   if (glide !== 0) {
-    oscillator.frequency.exponentialRampToValueAtTime(Math.max(30, freq + glide), now + duration);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(30, freq + glide), now + duration);
   }
 
+  const scaledVolume = volume * clamp(ui.settings.intensity, 0.3, 1.6);
   gain.gain.setValueAtTime(0.0001, now);
-  gain.gain.exponentialRampToValueAtTime(volume, now + 0.015);
+  gain.gain.exponentialRampToValueAtTime(scaledVolume, now + 0.015);
   gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
 
-  oscillator.connect(filter);
+  osc.connect(filter);
   filter.connect(gain);
-  gain.connect(context.destination);
+  gain.connect(audio.master);
 
-  oscillator.start(now);
-  oscillator.stop(now + duration + 0.04);
+  osc.start(now);
+  osc.stop(now + duration + 0.05);
 }
 
-function playChord(root) {
-  playTone(root, 0.13, "triangle", 0.06, 12);
-  playTone(root * 1.25, 0.16, "sine", 0.045, -8);
-  playTone(root * 1.5, 0.19, "square", 0.028, -15);
+function playChord(rootHz) {
+  playTone({ freq: rootHz, duration: 0.14, type: "triangle", volume: 0.055, glide: 16, cutoff: 2800 });
+  playTone({ freq: rootHz * 1.25, duration: 0.18, type: "sine", volume: 0.04, glide: -10, cutoff: 2400 });
+  playTone({ freq: rootHz * 1.5, duration: 0.2, type: "square", volume: 0.028, glide: -18, cutoff: 1900 });
 }
 
 function vibrate(pattern) {
-  if (!hapticEnabled || !navigator.vibrate) {
-    return;
-  }
+  if (!ui.settings.hapticEnabled || !navigator.vibrate) return;
   navigator.vibrate(pattern);
 }
 
-function boostScore(points) {
-  uiState.joyScore += points;
+function bumpJoy(points) {
+  const now = performance.now();
+  if (now - ui.lastActionAt < 1250) {
+    ui.combo = clamp(ui.combo + 1, 1, 9);
+  } else {
+    ui.combo = 1;
+  }
+  ui.lastActionAt = now;
+
+  const scored = points * ui.combo;
+  ui.joy += scored;
+
+  if (ui.joy > 0 && ui.joy % 100 < scored) {
+    // Small celebration every 100 joy.
+    spawnConfettiBurst(rand(0.25, 0.75) * width(), rand(0.25, 0.75) * height());
+    playChord(260 + rand(-30, 60));
+    vibrate([18, 18, 24]);
+    setStatus(`JOY ${ui.joy}  |  PARTY x${ui.combo}`);
+    ui.lastStatusAt = now;
+  }
 }
 
-function maybeShowMessage() {
+function maybeStatus() {
   const now = performance.now();
-  if (now - lastMessageStamp < 900) {
-    return;
-  }
-  lastMessageStamp = now;
-  setStatus(`${randomFrom(messages)} (JOY ${uiState.joyScore})`);
+  if (now - ui.lastStatusAt < 900) return;
+  ui.lastStatusAt = now;
+  setStatus(`${randomFrom(STATUS_LINES)}  |  JOY ${ui.joy}  |  x${Math.max(ui.combo, 1)}`);
+}
+
+function enforceLimit(arr, limit) {
+  const extra = arr.length - limit;
+  if (extra > 0) arr.splice(0, extra);
 }
 
 function spawnParticle(x, y, options = {}) {
-  const speed = options.speed ?? Math.random() * 1.8 + 0.45;
-  const angle = options.angle ?? Math.random() * Math.PI * 2;
+  const speed = options.speed ?? rand(0.4, 2.4);
+  const angle = options.angle ?? rand(0, Math.PI * 2);
   particles.push({
     x,
     y,
     vx: Math.cos(angle) * speed,
     vy: Math.sin(angle) * speed,
-    life: options.life ?? Math.random() * 38 + 35,
-    maxLife: options.maxLife ?? Math.random() * 38 + 35,
-    radius: options.radius ?? Math.random() * 2.8 + 1.5,
-    color: options.color ?? randomFrom(palette),
+    life: options.life ?? rand(34, 78),
+    maxLife: options.maxLife ?? options.life ?? rand(34, 78),
+    radius: options.radius ?? rand(1.2, 3.8),
+    color: options.color ?? randomFrom(BASE_PALETTE),
     drag: options.drag ?? 0.985,
     gravity: options.gravity ?? 0.012,
+    shape: options.shape ?? "dot", // dot | streak
   });
+  enforceLimit(particles, limits.particles);
 }
 
-function spawnRing(x, y, radius = 10, width = 3, color = randomFrom(palette)) {
+function spawnRing(x, y, options = {}) {
   rings.push({
     x,
     y,
-    radius,
-    width,
-    color,
-    life: 30,
-    maxLife: 30,
+    radius: options.radius ?? rand(6, 16),
+    width: options.width ?? rand(2, 4),
+    color: options.color ?? randomFrom(BASE_PALETTE),
+    life: options.life ?? 30,
+    maxLife: options.maxLife ?? options.life ?? 30,
   });
+  enforceLimit(rings, limits.rings);
 }
 
-function spawnBurst(x, y, count = 26, power = 2.8) {
+function spawnBurst(x, y, options = {}) {
+  const intensity = clamp(ui.settings.intensity, 0.3, 1.6);
+  const count = Math.round((options.count ?? 26) * intensity);
+  const power = (options.power ?? 3) * lerp(0.85, 1.25, intensity / 1.6);
   for (let i = 0; i < count; i += 1) {
     spawnParticle(x, y, {
-      speed: Math.random() * power + 0.35,
-      angle: (Math.PI * 2 * i) / count + Math.random() * 0.45,
-      radius: Math.random() * 3.7 + 1.3,
-      life: Math.random() * 30 + 38,
-      maxLife: 68,
+      speed: rand(0.35, power),
+      angle: (Math.PI * 2 * i) / count + rand(-0.22, 0.22),
+      radius: rand(1.2, 4),
+      life: rand(40, 78),
+      maxLife: 78,
       gravity: 0.02,
+      drag: 0.986,
+      shape: Math.random() < 0.16 ? "streak" : "dot",
     });
   }
-  spawnRing(x, y, Math.random() * 12 + 6, Math.random() * 2 + 2);
+  spawnRing(x, y);
 }
 
-function spawnTrail(x, y, vx, vy) {
-  const toneColor = randomFrom(palette);
-  for (let i = 0; i < 4; i += 1) {
+function spawnConfettiBurst(x, y) {
+  for (let i = 0; i < 120; i += 1) {
     spawnParticle(x, y, {
-      speed: Math.random() * 1.2 + 0.15,
-      angle: Math.random() * Math.PI * 2,
-      radius: Math.random() * 2 + 1,
-      life: Math.random() * 18 + 16,
-      maxLife: 36,
-      color: toneColor,
-      gravity: 0.003,
-      drag: 0.974,
+      speed: rand(0.6, 5.4),
+      angle: rand(0, Math.PI * 2),
+      radius: rand(1.2, 3.2),
+      life: rand(50, 110),
+      maxLife: 110,
+      color: randomFrom(BASE_PALETTE),
+      gravity: 0.03,
+      drag: 0.982,
+      shape: "streak",
     });
   }
-  spawnParticle(x, y, {
-    speed: Math.random() * 0.8 + 0.2,
-    angle: Math.atan2(vy, vx),
-    radius: 2.6,
-    life: 16,
-    maxLife: 24,
-    color: "#ffffff",
-    gravity: 0.001,
-    drag: 0.97,
-  });
+  spawnRing(x, y, { radius: 10, width: 3.5, life: 36, maxLife: 36, color: "#ffffff" });
 }
 
-function renderBackground(width, height, time) {
-  hueShift = (hueShift + 0.09) % 360;
-  const gradient = ctx.createLinearGradient(0, 0, width, height);
-  gradient.addColorStop(0, `hsla(${hueShift}, 88%, 15%, 0.21)`);
-  gradient.addColorStop(0.5, "rgba(4, 7, 18, 0.19)");
-  gradient.addColorStop(1, `hsla(${(hueShift + 64) % 360}, 74%, 17%, 0.24)`);
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, width, height);
+function width() {
+  return canvas.width / ui.dpr;
+}
 
-  const orbCount = 4;
-  for (let i = 0; i < orbCount; i += 1) {
+function height() {
+  return canvas.height / ui.dpr;
+}
+
+let hueShift = 0;
+function renderBackground(w, h, time) {
+  hueShift = (hueShift + 0.08) % 360;
+  const grad = ctx.createLinearGradient(0, 0, w, h);
+  grad.addColorStop(0, `hsla(${hueShift}, 88%, 15%, 0.21)`);
+  grad.addColorStop(0.5, "rgba(4, 7, 18, 0.19)");
+  grad.addColorStop(1, `hsla(${(hueShift + 64) % 360}, 74%, 17%, 0.24)`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+
+  for (let i = 0; i < 4; i += 1) {
     const cycle = time * 0.00028 + i * 1.19;
-    const x = width * (0.16 + (i / orbCount) * 0.78) + Math.sin(cycle) * 28;
-    const y = height * (0.24 + 0.11 * i) + Math.cos(cycle * 0.9) * 22;
-    const radius = 34 + i * 8 + Math.sin(cycle * 1.4) * 7;
-    const glow = ctx.createRadialGradient(x, y, 0, x, y, radius);
+    const x = w * (0.16 + (i / 4) * 0.78) + Math.sin(cycle) * 28;
+    const y = h * (0.24 + 0.11 * i) + Math.cos(cycle * 0.9) * 22;
+    const r = 34 + i * 8 + Math.sin(cycle * 1.4) * 7;
+    const glow = ctx.createRadialGradient(x, y, 0, x, y, r);
     glow.addColorStop(0, "rgba(255, 255, 255, 0.17)");
     glow.addColorStop(1, "rgba(255, 255, 255, 0)");
     ctx.fillStyle = glow;
     ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
   }
 }
 
-function renderParticles(width, height) {
+function renderPointerGlows(time) {
+  for (const p of pointers.values()) {
+    const pulse = 0.65 + Math.sin(time * 0.012 + p.seed) * 0.25;
+    const r = 18 + p.speed * 6;
+    const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+    g.addColorStop(0, `hsla(${p.hue}, 100%, 70%, ${0.34 * pulse})`);
+    g.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function renderParticles(w, h) {
   for (let i = particles.length - 1; i >= 0; i -= 1) {
     const p = particles[i];
     p.life -= 1;
@@ -249,7 +396,7 @@ function renderParticles(width, height) {
     p.x += p.vx;
     p.y += p.vy;
 
-    if (p.x < -30 || p.x > width + 30 || p.y < -30 || p.y > height + 30) {
+    if (p.x < -60 || p.x > w + 60 || p.y < -60 || p.y > h + 60) {
       particles.splice(i, 1);
       continue;
     }
@@ -257,174 +404,333 @@ function renderParticles(width, height) {
     const alpha = clamp(p.life / p.maxLife, 0, 1);
     ctx.globalAlpha = alpha;
     ctx.fillStyle = p.color;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.radius * (0.35 + alpha), 0, Math.PI * 2);
-    ctx.fill();
+
+    if (p.shape === "streak") {
+      const len = clamp(Math.hypot(p.vx, p.vy) * 6, 6, 26);
+      const ang = Math.atan2(p.vy, p.vx);
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(ang);
+      ctx.fillRect(-len * 0.35, -p.radius * 0.5, len, p.radius);
+      ctx.restore();
+    } else {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.radius * (0.35 + alpha), 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
   ctx.globalAlpha = 1;
 }
 
 function renderRings() {
   for (let i = rings.length - 1; i >= 0; i -= 1) {
-    const ring = rings[i];
-    ring.life -= 1;
-    if (ring.life <= 0) {
+    const r = rings[i];
+    r.life -= 1;
+    if (r.life <= 0) {
       rings.splice(i, 1);
       continue;
     }
-    ring.radius += 1.9;
-    const alpha = clamp(ring.life / ring.maxLife, 0, 1);
+    r.radius += 1.95;
+    const alpha = clamp(r.life / r.maxLife, 0, 1);
     ctx.globalAlpha = alpha;
-    ctx.strokeStyle = ring.color;
-    ctx.lineWidth = ring.width * alpha;
+    ctx.strokeStyle = r.color;
+    ctx.lineWidth = r.width * alpha;
     ctx.beginPath();
-    ctx.arc(ring.x, ring.y, ring.radius, 0, Math.PI * 2);
+    ctx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function renderBubbles(w, h) {
+  for (let i = bubbles.length - 1; i >= 0; i -= 1) {
+    const b = bubbles[i];
+    b.life -= 1;
+    if (b.life <= 0 || b.r <= 2) {
+      bubbles.splice(i, 1);
+      continue;
+    }
+
+    // Physics
+    b.vx *= 0.992;
+    b.vy = b.vy * 0.992 + Math.sin((performance.now() + b.seed) * 0.001) * 0.004;
+    b.x += b.vx;
+    b.y += b.vy;
+
+    if (b.x < b.r) {
+      b.x = b.r;
+      b.vx *= -0.85;
+    } else if (b.x > w - b.r) {
+      b.x = w - b.r;
+      b.vx *= -0.85;
+    }
+    if (b.y < b.r) {
+      b.y = b.r;
+      b.vy *= -0.85;
+    } else if (b.y > h - b.r) {
+      b.y = h - b.r;
+      b.vy *= -0.85;
+    }
+
+    // Render
+    const alpha = clamp(b.life / b.maxLife, 0, 1) * 0.92;
+    ctx.globalAlpha = alpha;
+
+    const gx = b.x - b.r * 0.35;
+    const gy = b.y - b.r * 0.35;
+    const grad = ctx.createRadialGradient(gx, gy, b.r * 0.12, b.x, b.y, b.r);
+    grad.addColorStop(0, "rgba(255,255,255,0.85)");
+    grad.addColorStop(0.25, "rgba(255,255,255,0.22)");
+    grad.addColorStop(1, `${b.color}`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = alpha * 0.7;
+    ctx.strokeStyle = "rgba(255,255,255,0.45)";
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r - 0.8, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function renderRibbons(w, h) {
+  for (let i = ribbons.length - 1; i >= 0; i -= 1) {
+    const r = ribbons[i];
+    r.life -= 1;
+    if (r.life <= 0) {
+      ribbons.splice(i, 1);
+      continue;
+    }
+
+    const alpha = clamp(r.life / r.maxLife, 0, 1);
+    ctx.globalAlpha = alpha;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = r.width * (0.55 + alpha * 0.45);
+    ctx.strokeStyle = r.color;
+
+    const pts = r.points;
+    if (pts.length < 3) continue;
+
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let p = 1; p < pts.length - 2; p += 1) {
+      const cx = pts[p].x;
+      const cy = pts[p].y;
+      const nx = (pts[p].x + pts[p + 1].x) * 0.5;
+      const ny = (pts[p].y + pts[p + 1].y) * 0.5;
+      ctx.quadraticCurveTo(cx, cy, nx, ny);
+    }
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
 }
 
 function animate(time) {
-  const width = canvas.width / dpr;
-  const height = canvas.height / dpr;
+  const w = width();
+  const h = height();
 
   ctx.globalCompositeOperation = "source-over";
-  renderBackground(width, height, time);
+  renderBackground(w, h, time);
+
+  // Mode-specific visuals can be present even when not selected.
+  ctx.globalCompositeOperation = "source-over";
+  renderBubbles(w, h);
+  renderRibbons(w, h);
 
   ctx.globalCompositeOperation = "lighter";
+  renderPointerGlows(time);
   renderRings();
-  renderParticles(width, height);
-  ctx.globalCompositeOperation = "source-over";
+  renderParticles(w, h);
 
+  ctx.globalCompositeOperation = "source-over";
   requestAnimationFrame(animate);
 }
 
-function positionFromPointer(event) {
+function posFromEvent(ev) {
   const rect = canvas.getBoundingClientRect();
-  return {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top,
-  };
+  return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
 }
 
-function handlePointerDown(event) {
-  activePointerId = event.pointerId;
-  pointerDown = true;
-  dragDistance = 0;
-  canvas.setPointerCapture(activePointerId);
+function addRibbonPoint(ptr, x, y, now) {
+  if (!ptr.path) ptr.path = [];
+  const last = ptr.path[ptr.path.length - 1];
+  if (last && Math.hypot(x - last.x, y - last.y) < 3) return;
+  ptr.path.push({ x, y, t: now });
+  if (ptr.path.length > 220) ptr.path.shift();
+}
 
-  const { x, y } = positionFromPointer(event);
-  downX = x;
-  downY = y;
-
-  spawnBurst(x, y, 26, 3.4);
-  playTone(250 + Math.random() * 130, 0.12, "triangle", 0.06, 18);
+function fireworksDown(ptr) {
+  spawnBurst(ptr.x, ptr.y, { count: 26, power: 3.4 });
+  playTone({ freq: 250 + rand(0, 140), duration: 0.12, type: "triangle", volume: 0.06, glide: 18 });
   vibrate(12);
-  boostScore(1);
-  maybeShowMessage();
+  bumpJoy(1);
+  maybeStatus();
 }
 
-function handlePointerMove(event) {
-  if (!pointerDown || event.pointerId !== activePointerId) {
-    return;
-  }
-  const now = performance.now();
-  const { x, y } = positionFromPointer(event);
-  const dx = x - downX;
-  const dy = y - downY;
-  const stepDistance = Math.hypot(dx, dy);
-  dragDistance += stepDistance;
-  downX = x;
-  downY = y;
-
-  if (now - lastTrailStamp > 14) {
-    lastTrailStamp = now;
-    spawnTrail(x, y, dx, dy);
-  }
-
-  if (now - lastSoundStamp > 58) {
-    lastSoundStamp = now;
-    const note = 330 + (dragDistance % 200);
-    playTone(note, 0.08, "sine", 0.03, 30);
+function fireworksMove(ptr, now) {
+  if (now - ptr.lastTrailAt > 14) {
+    ptr.lastTrailAt = now;
+    const toneColor = randomFrom(BASE_PALETTE);
+    for (let i = 0; i < 5; i += 1) {
+      spawnParticle(ptr.x, ptr.y, {
+        speed: rand(0.2, 1.3),
+        angle: rand(0, Math.PI * 2),
+        radius: rand(0.9, 2.2),
+        life: rand(14, 32),
+        maxLife: 34,
+        color: toneColor,
+        gravity: 0.003,
+        drag: 0.973,
+      });
+    }
   }
 
-  if (now - lastHapticStamp > 120) {
-    lastHapticStamp = now;
+  if (now - ptr.lastSoundAt > 58) {
+    ptr.lastSoundAt = now;
+    const note = 320 + ((ptr.dragDistance * 0.7) % 260);
+    playTone({ freq: note, duration: 0.08, type: "sine", volume: 0.03, glide: 30, cutoff: 3400 });
+  }
+
+  if (now - ptr.lastHapticAt > 120) {
+    ptr.lastHapticAt = now;
     vibrate(4);
   }
 
-  boostScore(1);
+  bumpJoy(1);
 }
 
-function handlePointerUp(event) {
-  if (event.pointerId !== activePointerId) {
-    return;
-  }
-  pointerDown = false;
-  canvas.releasePointerCapture(activePointerId);
-  activePointerId = null;
+function fireworksUp(ptr) {
+  const burstCount = clamp(Math.round(18 + ptr.dragDistance * 0.1), 20, 70);
+  const burstPower = clamp(2 + ptr.dragDistance * 0.008, 2.6, 5.8);
+  spawnBurst(ptr.x, ptr.y, { count: burstCount, power: burstPower });
 
-  const { x, y } = positionFromPointer(event);
-  const burstCount = clamp(Math.round(18 + dragDistance * 0.1), 20, 64);
-  const burstPower = clamp(2 + dragDistance * 0.008, 2.6, 5.4);
-  spawnBurst(x, y, burstCount, burstPower);
-
-  const root = clamp(240 + dragDistance * 0.95, 220, 620);
+  const root = clamp(240 + ptr.dragDistance * 0.95, 220, 640);
   playChord(root);
 
-  if (dragDistance < 18) {
+  if (ptr.dragDistance < 18) {
     vibrate([14, 18, 12]);
-    setStatus(`톡! 미니 폭죽 성공 (JOY ${uiState.joyScore})`);
-    boostScore(3);
+    setStatus(`Tap pop.  JOY ${ui.joy}`);
+    bumpJoy(3);
   } else {
     vibrate([24, 12, 30]);
-    setStatus(`드래그 파동 ${Math.round(dragDistance)}px (JOY ${uiState.joyScore})`);
-    boostScore(Math.round(clamp(dragDistance / 12, 5, 24)));
+    setStatus(`Drag wave ${Math.round(ptr.dragDistance)}px.  JOY ${ui.joy}`);
+    bumpJoy(Math.round(clamp(ptr.dragDistance / 14, 5, 26)));
   }
+}
+
+function onPointerDown(ev) {
+  const now = performance.now();
+  const { x, y } = posFromEvent(ev);
+  canvas.setPointerCapture(ev.pointerId);
+
+  const ptr = {
+    id: ev.pointerId,
+    x,
+    y,
+    lastX: x,
+    lastY: y,
+    lastT: now,
+    dragDistance: 0,
+    speed: 0,
+    hue: Math.floor(rand(0, 360)),
+    seed: rand(0, 1000),
+    lastTrailAt: 0,
+    lastSoundAt: 0,
+    lastHapticAt: 0,
+    path: [],
+  };
+  pointers.set(ev.pointerId, ptr);
+
+  ensureAudio(); // resume on first gesture if enabled
+
+  if (ui.settings.modeId === "ribbons") addRibbonPoint(ptr, x, y, now);
+
+  // For now, fireworks behavior is the baseline for all modes until mode-specific logic is added.
+  fireworksDown(ptr);
+}
+
+function onPointerMove(ev) {
+  const ptr = pointers.get(ev.pointerId);
+  if (!ptr) return;
+
+  const now = performance.now();
+  const { x, y } = posFromEvent(ev);
+  const dx = x - ptr.x;
+  const dy = y - ptr.y;
+  const dist = Math.hypot(dx, dy);
+  const dt = Math.max(8, now - ptr.lastT);
+
+  ptr.lastX = ptr.x;
+  ptr.lastY = ptr.y;
+  ptr.x = x;
+  ptr.y = y;
+  ptr.dragDistance += dist;
+  ptr.speed = lerp(ptr.speed, dist / dt, 0.35);
+  ptr.lastT = now;
+
+  if (ui.settings.modeId === "ribbons") addRibbonPoint(ptr, x, y, now);
+
+  fireworksMove(ptr, now);
+}
+
+function onPointerUp(ev) {
+  const ptr = pointers.get(ev.pointerId);
+  if (!ptr) return;
+  pointers.delete(ev.pointerId);
+  try {
+    canvas.releasePointerCapture(ev.pointerId);
+  } catch {
+    // ignore
+  }
+
+  if (ui.settings.modeId === "ribbons" && ptr.path.length > 6) {
+    ribbons.push({
+      points: ptr.path.slice(),
+      life: 80,
+      maxLife: 80,
+      width: 7.5 * clamp(ui.settings.intensity, 0.3, 1.6),
+      color: `hsla(${ptr.hue}, 98%, 70%, 0.9)`,
+    });
+    enforceLimit(ribbons, limits.ribbons);
+  }
+
+  fireworksUp(ptr);
+  maybeStatus();
 }
 
 function onResize() {
   resizeCanvas();
-  setStatus("화면 크기에 맞게 조정됨");
+  setStatus("Resized.");
 }
 
-function bindEvents() {
-  canvas.addEventListener("pointerdown", handlePointerDown);
-  canvas.addEventListener("pointermove", handlePointerMove);
-  canvas.addEventListener("pointerup", handlePointerUp);
-  canvas.addEventListener("pointercancel", handlePointerUp);
+function cycleMode() {
+  ui.modeIndex = (ui.modeIndex + 1) % MODES.length;
+  ui.settings.modeId = MODES[ui.modeIndex].id;
+  updateControls();
+  saveSettings();
 
-  window.addEventListener("resize", onResize);
+  if (ui.settings.modeId === "fireworks") setStatus("Mode: Fireworks");
+  if (ui.settings.modeId === "bubbles") setStatus("Mode: Bubbles (coming alive next)");
+  if (ui.settings.modeId === "ribbons") setStatus("Mode: Ribbons");
 
-  soundToggle.addEventListener("click", () => {
-    soundEnabled = !soundEnabled;
-    if (soundEnabled) {
-      ensureAudio();
-      playTone(420, 0.08, "triangle", 0.05, 20);
-    }
-    updateToggles();
-    setStatus(soundEnabled ? "사운드 켜짐" : "사운드 꺼짐");
-  });
-
-  hapticToggle.addEventListener("click", () => {
-    hapticEnabled = !hapticEnabled;
-    updateToggles();
-    if (hapticEnabled) {
-      vibrate([10, 10, 10]);
-    }
-    setStatus(hapticEnabled ? "진동 켜짐" : "진동 꺼짐");
-  });
+  vibrate(8);
+  playTone({ freq: 420 + ui.modeIndex * 90, duration: 0.08, type: "triangle", volume: 0.05, glide: 20 });
 }
 
-function seedAmbientParticles() {
-  const width = canvas.width / dpr;
-  const height = canvas.height / dpr;
+function seedAmbient() {
+  const w = width();
+  const h = height();
   for (let i = 0; i < 90; i += 1) {
-    spawnParticle(Math.random() * width, Math.random() * height, {
-      speed: Math.random() * 0.25 + 0.04,
-      angle: Math.random() * Math.PI * 2,
-      radius: Math.random() * 1.2 + 0.35,
-      life: Math.random() * 240 + 120,
+    spawnParticle(rand(0, w), rand(0, h), {
+      speed: rand(0.04, 0.28),
+      angle: rand(0, Math.PI * 2),
+      radius: rand(0.35, 1.25),
+      life: rand(120, 360),
       maxLife: 360,
       color: "rgba(255,255,255,0.7)",
       gravity: 0,
@@ -433,13 +739,84 @@ function seedAmbientParticles() {
   }
 }
 
+function bindUI() {
+  modeToggle.addEventListener("click", cycleMode);
+
+  soundToggle.addEventListener("click", () => {
+    ui.settings.soundEnabled = !ui.settings.soundEnabled;
+    updateControls();
+    saveSettings();
+    if (ui.settings.soundEnabled) {
+      ensureAudio();
+      playTone({ freq: 440, duration: 0.08, type: "triangle", volume: 0.05, glide: 20 });
+      setStatus("Sound on.");
+    } else {
+      setStatus("Sound off.");
+    }
+  });
+
+  hapticToggle.addEventListener("click", () => {
+    ui.settings.hapticEnabled = !ui.settings.hapticEnabled;
+    updateControls();
+    saveSettings();
+    if (ui.settings.hapticEnabled) {
+      vibrate([10, 10, 10]);
+      setStatus("Vibration on.");
+    } else {
+      setStatus("Vibration off.");
+    }
+  });
+
+  intensitySlider.addEventListener("input", () => {
+    ui.settings.intensity = clamp(Number(intensitySlider.value), 0.3, 1.6);
+    saveSettings();
+    setStatus(`Intensity ${ui.settings.intensity.toFixed(1)}x`);
+  });
+
+  window.addEventListener("keydown", (ev) => {
+    if (ev.code === "KeyM") cycleMode();
+    if (ev.code === "KeyS") soundToggle.click();
+    if (ev.code === "KeyV") hapticToggle.click();
+    if (ev.code === "Space") {
+      const x = rand(0.2, 0.8) * width();
+      const y = rand(0.2, 0.8) * height();
+      spawnConfettiBurst(x, y);
+      playChord(280 + rand(-40, 90));
+      bumpJoy(6);
+      maybeStatus();
+    }
+    if (ev.code === "ArrowUp") {
+      ui.settings.intensity = clamp(ui.settings.intensity + 0.1, 0.3, 1.6);
+      updateControls();
+      saveSettings();
+      setStatus(`Intensity ${ui.settings.intensity.toFixed(1)}x`);
+    }
+    if (ev.code === "ArrowDown") {
+      ui.settings.intensity = clamp(ui.settings.intensity - 0.1, 0.3, 1.6);
+      updateControls();
+      saveSettings();
+      setStatus(`Intensity ${ui.settings.intensity.toFixed(1)}x`);
+    }
+  });
+}
+
 function boot() {
+  loadSettings();
+  updateControls();
   resizeCanvas();
-  bindEvents();
-  updateToggles();
-  seedAmbientParticles();
-  animate(performance.now());
-  setStatus("준비 완료: 화면을 클릭하고 드래그하세요.");
+  bindUI();
+
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointermove", onPointerMove);
+  canvas.addEventListener("pointerup", onPointerUp);
+  canvas.addEventListener("pointercancel", onPointerUp);
+
+  window.addEventListener("resize", onResize);
+
+  seedAmbient();
+  requestAnimationFrame(animate);
+  setStatus("Ready. Click or drag.");
 }
 
 boot();
+
