@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Joy Playground</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bungee:wght@400&family=Nunito:wght@600;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <canvas id="joy-canvas" aria-label="joy interaction area"></canvas>
+
+      <section class="hud">
+        <h1>JOY PLAYGROUND</h1>
+        <p class="hint">클릭하거나 드래그해서 빛, 소리, 진동을 느껴보세요.</p>
+        <div class="controls">
+          <button id="sound-toggle" class="toggle" type="button" aria-pressed="true">SOUND ON</button>
+          <button id="haptic-toggle" class="toggle" type="button" aria-pressed="true">VIBE ON</button>
+        </div>
+        <p id="status" class="status">준비 완료</p>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
