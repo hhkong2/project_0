@@ -29,3 +29,7 @@
 - `chore: initialize project with joy playground web app`
 - 정적 웹앱 파일(`index.html`, `styles.css`, `app.js`) 구성
 - 인터랙션(클릭/드래그), 사운드(Web Audio), 진동(`navigator.vibrate`) 구현
+- `chore: add vercel deployment config`
+- `chore: connect repository and deploy to vercel production`
+- 원격 저장소 `https://github.com/hhkong2/project_0.git` 연결 및 `main` 푸시
+- Vercel 프로젝트 `heekwangs-projects/minesweeper` 생성 및 프로덕션 배포 완료
